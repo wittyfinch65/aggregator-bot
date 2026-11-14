@@ -283,7 +283,7 @@ def build_catalog(brief, probes):
                 free = False
             context = None
             if row is not None and row["context_length"] is not None:
-                context = row["context_language"] if False else row["context_length"]
+                context = row["context_length"]
             elif listed_model is not None:
                 context = listed_model["context_length"]
             # A model only the table knows is not in the provider's own listing:
@@ -871,6 +871,8 @@ class Aggregator:
     def __init__(self, brief, probes, catalog):
         self.brief = brief
         self.probes = {probe.provider["id"]: probe for probe in probes}
+        self.providers = {provider["id"]: provider for provider in brief.providers}
+        self.provider_order = {provider["id"]: i for i, provider in enumerate(brief.providers)}
         self.catalog = catalog
         self.manifest_index = 0
         self.answer_seq = 0
@@ -879,12 +881,14 @@ class Aggregator:
     # -- routing -----------------------------------------------------------
 
     def candidates(self, requires, json_mode, client_api):
-        provider_order = {p["id"]: i for i, p in enumerate(self.brief.providers)}
         ranked = []
         for (provider_id, model_id), row in self.brief.ratings.items():
             if not row["free"]:
                 continue
             if not meets_requirements(row, requires):
+                continue
+            provider = self.providers.get(provider_id)
+            if provider is None:
                 continue
             probe = self.probes.get(provider_id)
             if probe is not None and probe.ok:
@@ -892,16 +896,13 @@ class Aggregator:
                 entry = listed.get(model_id)
                 if entry is None or entry["free"] is not True:
                     continue
-            provider = next((p for p in self.brief.providers if p["id"] == provider_id), None)
-            if provider is None:
-                continue
             # A JSON-mode OpenAI request must ride a wire that can carry it:
             # the Anthropic wire has no response_format and would echo it absent.
             if json_mode and provider["wire"] == "anthropic":
                 continue
             ranked.append((provider, model_id, row))
         ranked.sort(key=lambda item: (-item[2]["rating_milli"],
-                                      provider_order[item[0]["id"]], item[1]))
+                                      self.provider_order[item[0]["id"]], item[1]))
         return ranked
 
     def serve(self, api, body):
@@ -913,13 +914,14 @@ class Aggregator:
             seq = self.answer_seq
         manifest = self.brief.manifest
         if index < len(manifest):
+            # The manifest is the declared source of each request's
+            # requirements and of whether it streams; the env's own workload
+            # file keeps the body's stream flag in step with it.
             requires = manifest[index]["requires"]
             stream = manifest[index]["stream"]
         else:
             requires = body_requirements(api, body)
             stream = body.get("stream") is True
-        if body.get("stream") is True:
-            stream = True
         json_mode = client_json_mode(api, body)
         last_status = 502
         for provider, model_id, _row in self.candidates(requires, json_mode, api):
